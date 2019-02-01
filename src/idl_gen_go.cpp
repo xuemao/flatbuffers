@@ -17,6 +17,7 @@
 // independent from idl_parser, since this code is not needed for most clients
 
 #include <sstream>
+#include <iostream>
 #include <string>
 
 #include "flatbuffers/code_generators.h"
@@ -197,6 +198,32 @@ class GoGenerator : public BaseGenerator {
     code += "}\n\n";
   }
 
+  // Begin enum name code.
+  void BeginEnumValues(const EnumDef &enum_def, std::string *code_ptr) {
+    std::string &code = *code_ptr;
+    code += "var EnumValues";
+    code += enum_def.name;
+    code += " = map[string]" + GetEnumTypeName(enum_def) + "{\n";
+  }
+
+  // A single enum name member.
+  void EnumValueMember(const EnumDef &enum_def, const EnumVal ev,
+                      std::string *code_ptr) {
+    std::string &code = *code_ptr;
+    code += "\t\"";
+    code += ev.name;
+    code += "\":";
+    code += enum_def.name;
+    code += ev.name;
+    code += ",\n";
+  }
+
+  // End enum name code.
+  void EndEnumValues(std::string *code_ptr) {
+    std::string &code = *code_ptr;
+    code += "}\n\n";
+  }
+
   // Initialize a new struct or table from existing data.
   void NewRootTypeFromBuffer(const StructDef &struct_def,
                              std::string *code_ptr) {
@@ -366,6 +393,32 @@ class GoGenerator : public BaseGenerator {
     code += "}\n\n";
   }
 
+  void GetUnionQuickAccessers(const StructDef &struct_def, const FieldDef &field,
+                              std::string *code_ptr) {
+    std::string &code = *code_ptr;
+    const EnumDef &enum_def = *field.value.type.enum_def;
+    for (auto it = enum_def.vals.vec.begin(); it != enum_def.vals.vec.end();
+         ++it) {
+      auto &ev = **it;
+      if (ev.value == 0) {
+        continue;
+      }
+      GenReceiver(struct_def, code_ptr);
+      code += " Get" + ev.name + "() *" + ev.name + " {\n";
+      code += "\tif rcv." + MakeCamel(field.name) + "Type() != " + enum_def.name + ev.name + " {\n";
+      code += "\t\treturn nil\n";
+      code += "\t}\n";
+      code += "\tunionTable := new(flatbuffers.Table)\n";
+      code += "\tif !rcv." + MakeCamel(field.name) + "(unionTable) {\n";
+      code += "\t\treturn nil\n";
+      code += "\t}\n";
+      code += "\tresult := new(" + ev.name + ")\n";
+      code += "\tresult.Init(unionTable.Bytes, unionTable.Pos)\n";
+      code += "\treturn result\n";
+      code += "}\n\n";
+    }
+  }
+
   // Get the value of a vector's struct member.
   void GetMemberOfVectorOfStruct(const StructDef &struct_def,
                                  const FieldDef &field,
@@ -386,6 +439,33 @@ class GoGenerator : public BaseGenerator {
     code += "\t\tobj.Init(rcv._tab.Bytes, x)\n";
     code += "\t\treturn true\n\t}\n";
     code += "\treturn false\n";
+    code += "}\n\n";
+  }
+
+  // Get the value of a vector's struct member.
+  void GetAllMemberOfVector(const StructDef &struct_def,
+                            const FieldDef &field,
+                            std::string *code_ptr) {
+    std::string &code = *code_ptr;
+    auto fieldCamelName = MakeCamel(field.name);
+    GenReceiver(struct_def, code_ptr);
+    if (field.value.type.element == BASE_TYPE_STRUCT) {
+      code += " Get" + fieldCamelName + "() (result []*" + TypeName(field) + ") {\n";
+    } else {
+      code += " Get" + fieldCamelName + "() (result []" + TypeName(field) + ") {\n";
+    }
+    code += "\tresult = nil\n";
+    code += "\tfor i:= 0; i < rcv." + fieldCamelName + "Length(); i++ {\n";
+    if (field.value.type.element == BASE_TYPE_STRUCT) {
+      code += "\t\tobj := new(" + TypeName(field) + ")\n";
+      code += "\t\tif rcv." + fieldCamelName + "(obj, i) {\n";
+      code += "\t\t\tresult = append(result, obj)\n";
+      code += "\t\t}\n";
+    } else {
+      code += "\t\tresult = append(result, rcv." + fieldCamelName + "(i))\n";
+    }
+    code += "\t}\n";
+    code += "\treturn result\n";
     code += "}\n\n";
   }
 
@@ -491,7 +571,7 @@ class GoGenerator : public BaseGenerator {
     code += "(builder *flatbuffers.Builder) {\n";
     code += "\tbuilder.StartObject(";
     code += NumToString(struct_def.fields.vec.size());
-    code += ")\n}\n";
+    code += ")\n}\n\n";
   }
 
   // Set the value of a table's field.
@@ -518,7 +598,7 @@ class GoGenerator : public BaseGenerator {
       code += GoIdentity(field.name);
     }
     code += ", " + GenConstant(field);
-    code += ")\n}\n";
+    code += ")\n}\n\n";
   }
 
   // Set the value of one of the members of a table's vector.
@@ -542,13 +622,18 @@ class GoGenerator : public BaseGenerator {
     std::string &code = *code_ptr;
     code += "func " + struct_def.name + "End";
     code += "(builder *flatbuffers.Builder) flatbuffers.UOffsetT ";
-    code += "{\n\treturn builder.EndObject()\n}\n";
+    code += "{\n\treturn builder.EndObject()\n}\n\n";
   }
 
   // Generate the receiver for function signatures.
   void GenReceiver(const StructDef &struct_def, std::string *code_ptr) {
     std::string &code = *code_ptr;
     code += "func (rcv *" + struct_def.name + ")";
+  }
+
+  void GenInnerReceiver(const StructDef &struct_def, std::string *code_ptr) {
+    std::string &code = *code_ptr;
+    code += "func (rcv *Inner" + struct_def.name + ")";
   }
 
   // Generate a struct field getter, conditioned on its child type(s).
@@ -578,9 +663,13 @@ class GoGenerator : public BaseGenerator {
           } else {
             GetMemberOfVectorOfNonStruct(struct_def, field, code_ptr);
           }
+          GetAllMemberOfVector(struct_def, field, code_ptr);
           break;
         }
-        case BASE_TYPE_UNION: GetUnionField(struct_def, field, code_ptr); break;
+        case BASE_TYPE_UNION:
+          GetUnionField(struct_def, field, code_ptr);
+          GetUnionQuickAccessers(struct_def, field, code_ptr);
+          break;
         default: FLATBUFFERS_ASSERT(0);
       }
     }
@@ -652,6 +741,240 @@ class GoGenerator : public BaseGenerator {
     GetEndOffsetOnTable(struct_def, code_ptr);
   }
 
+  // Generate table constructors, conditioned on its members' types.
+  void GenInnerObject(const StructDef &struct_def, std::string *code_ptr) {
+    std::string &code = *code_ptr;
+    code += "type Inner" + struct_def.name + " struct {\n";
+    for (auto it = struct_def.fields.vec.begin();
+         it != struct_def.fields.vec.end(); ++it) {
+      auto &field = **it;
+      if (field.deprecated) continue;
+      auto fieldCamelName = MakeCamel(field.name);
+      const auto& type = field.value.type;
+      if (type.base_type == BASE_TYPE_UNION) {
+        code += "\t" + fieldCamelName + " interface{}";
+      } else if (type.base_type == BASE_TYPE_UTYPE) {
+        code += "\t" + fieldCamelName + " " + GetEnumTypeName(*type.enum_def);
+      } else if (type.base_type == BASE_TYPE_VECTOR) {
+        if (type.element == BASE_TYPE_STRUCT) {
+          code += "\t" + fieldCamelName + " []*Inner" + TypeName(field);
+        } else if (type.element == BASE_TYPE_STRING) {
+          code += "\t" + fieldCamelName + " []string";
+        } else {
+          code += "\t" + fieldCamelName + " []" + TypeName(field);
+        }
+      } else if (type.base_type == BASE_TYPE_STRUCT) {
+        code += "\t" + fieldCamelName + " *Inner" + TypeName(field);
+      } else if (type.base_type == BASE_TYPE_STRING) {
+        code += "\t" + fieldCamelName + " string";
+      } else {
+        code += "\t" + fieldCamelName + " " + TypeName(field);
+      }
+      code += " `json:\"" + field.name + "\"`\n";
+    }
+    code += "}\n\n";
+  }
+
+  void GenObjectStringFunc(const StructDef &struct_def, std::string *code_ptr) {
+    std::string &code = *code_ptr;
+    GenReceiver(struct_def, code_ptr);
+    code += " String() string {\n";
+    code += "\treturn rcv.ToInner().String()\n";
+    code += "}\n\n";
+  }
+
+  void GenInnerObjectStringFunc(const StructDef &struct_def, std::string *code_ptr) {
+    std::string &code = *code_ptr;
+    GenInnerReceiver(struct_def, code_ptr);
+    code += " String() string {\n";
+    code += "\tjsonObj, _ := json.Marshal(rcv)\n";
+    code += "\treturn string(jsonObj)\n";
+    code += "}\n\n";
+  }
+
+  void GenToInnerObject(const StructDef &struct_def, std::string *code_ptr) {
+    std::string &code = *code_ptr;
+    GenReceiver(struct_def, code_ptr);
+    code += " ToInner() *Inner" + struct_def.name + " {\n";
+    code += "\tresult := &Inner" + struct_def.name + "{}\n";
+    for (auto it = struct_def.fields.vec.begin();
+         it != struct_def.fields.vec.end(); ++it) {
+      auto &field = **it;
+      if (field.deprecated) continue;
+      auto fieldCamelName = MakeCamel(field.name);
+      const auto& type = field.value.type;
+      if (type.base_type == BASE_TYPE_UNION) {
+        const EnumDef &enum_def = *type.enum_def;
+        for (auto it = enum_def.vals.vec.begin(); it != enum_def.vals.vec.end(); ++it) {
+          auto &ev = **it;
+          if (ev.value == 0) {
+            continue;
+          }
+          code += "\tif rcv." + fieldCamelName + "Type() == " + enum_def.name + ev.name + " {\n";
+          code += "\t\tresult." + fieldCamelName + " = rcv.Get" + ev.name + "().ToInner()\n";
+          code += "\t}\n";
+        }
+      } else if (type.base_type == BASE_TYPE_VECTOR) {
+        code += "\tfor i:= 0; i < rcv." + fieldCamelName + "Length(); i++ {\n";
+        if (type.element == BASE_TYPE_STRUCT) {
+          code += "\t\tobj := new(" + TypeName(field) + ")\n";
+          code += "\t\trcv." + fieldCamelName + "(obj, i)\n";
+          code += "\t\tresult." + fieldCamelName + " = append(result." +
+            fieldCamelName + ", obj.ToInner())\n";
+        } else if (type.element == BASE_TYPE_STRING) {
+          code += "\t\tresult." + fieldCamelName + " = append(result." +
+            fieldCamelName + ", string(rcv." + fieldCamelName + "(i)))\n";
+        } else {
+          code += "\t\tresult." + fieldCamelName + " = append(result." +
+            fieldCamelName + ", rcv." + fieldCamelName + "(i))\n";
+        }
+        code += "\t}\n";
+      } else if (type.base_type == BASE_TYPE_STRUCT) {
+        code += "\ttmp" + fieldCamelName + " := rcv." + fieldCamelName + "(nil)\n";
+        code += "\tif tmp" + fieldCamelName + " != nil {\n";
+        code += "\t\tresult." + fieldCamelName + " = rcv." + fieldCamelName + "(nil).ToInner()\n";
+        code += "\t}\n";
+      } else if (type.base_type == BASE_TYPE_STRING) {
+        code += "\tresult." + fieldCamelName + " = string(rcv." + fieldCamelName + "())\n";
+      } else {
+        code += "\tresult." + fieldCamelName + " = rcv." + fieldCamelName + "()\n";
+      }
+    }
+    code += "\treturn result\n";
+    code += "}\n\n";
+  }
+
+  void GenInnerObjectToFlatBuffer(const StructDef &struct_def, std::string *code_ptr) {
+    std::string &code = *code_ptr;
+    GenInnerReceiver(struct_def, code_ptr);
+    code += " ToFlatBuffer(builder *flatbuffers.Builder) flatbuffers.UOffsetT {\n";
+    for (auto it = struct_def.fields.vec.begin(); it != struct_def.fields.vec.end(); ++it) {
+      auto &field = **it;
+      const auto& type = field.value.type;
+      if (field.deprecated || type.base_type != BASE_TYPE_UNION) continue;
+      auto fieldCamelName = MakeCamel(field.name);
+      code += "\t" + field.name + "Offset := flatbuffers.UOffsetT(0)\n";
+      code += "\tif rcv." + fieldCamelName + " != nil {\n";
+      const EnumDef &enum_def = *type.enum_def;
+      for (auto it = enum_def.vals.vec.begin(); it != enum_def.vals.vec.end(); ++it) {
+        auto &ev = **it;
+        if (ev.value == 0) {
+          continue;
+        }
+        code += "\t\tif rcv." + fieldCamelName + "Type == " + enum_def.name + ev.name + " {\n";
+        code += "\t\t\t" + field.name + "Offset = rcv." + fieldCamelName + ".(*Inner" + ev.name + ").ToFlatBuffer(builder)\n";
+        code += "\t\t}\n";
+      }
+      code += "\t}\n\n";
+    }
+
+    for (auto it = struct_def.fields.vec.begin(); it != struct_def.fields.vec.end(); ++it) {
+      auto &field = **it;
+      const auto& type = field.value.type;
+      if (field.deprecated || type.base_type != BASE_TYPE_VECTOR) continue;
+      auto fieldCamelName = MakeCamel(field.name);
+      code += "\t" + field.name + "Offset := flatbuffers.UOffsetT(0)\n";
+      code += "\tif len(rcv." + fieldCamelName + ") > 0 {\n";
+      if (type.element == BASE_TYPE_STRUCT || type.element == BASE_TYPE_STRING) {
+        std::string toOffsetMethod = (type.element == BASE_TYPE_STRUCT)
+          ? "v.ToFlatBuffer(builder)"
+          : "builder.CreateString(v)";
+        code += "\t\tvar offsets []flatbuffers.UOffsetT\n";
+        code += "\t\tfor _, v := range rcv." + fieldCamelName + " {\n";
+        code += "\t\t\toffsets = append(offsets, " + toOffsetMethod + ")\n";
+        code += "\t\t}\n";
+        code += "\t\t" + struct_def.name + "Start" + fieldCamelName + "Vector(builder, len(offsets))\n";
+        code += "\t\tfor i := len(offsets) - 1; i >= 0; i-- {\n";
+        code += "\t\t\tbuilder.PrependUOffsetT(offsets[i])\n";
+        code += "\t\t}\n";
+        code += "\t\t" + field.name + "Offset = builder.EndVector(len(offsets))\n";
+      } else {
+        std::string lengthStr = "len(rcv." + fieldCamelName + ")";
+        code += "\t\t" + struct_def.name + "Start" + fieldCamelName +
+          "Vector(builder, " + lengthStr + ")\n";
+        code += "\t\tfor i := " + lengthStr + " - 1; i >= 0; i-- {\n";
+        code += "\t\t\tbuilder.Prepend" + MakeCamel(GenTypeBasic(type.VectorType())) + "(rcv." + fieldCamelName + "[i])\n";
+        code += "\t\t}\n";
+        code += "\t\t" + field.name + "Offset = builder.EndVector(" + lengthStr + ")\n";
+      }
+      code += "\t}\n\n";
+    }
+
+    for (auto it = struct_def.fields.vec.begin(); it != struct_def.fields.vec.end(); ++it) {
+      auto &field = **it;
+      if (field.deprecated || field.value.type.base_type != BASE_TYPE_STRUCT) continue;
+      auto fieldCamelName = MakeCamel(field.name);
+      code += "\t" + field.name + "Offset := flatbuffers.UOffsetT(0)\n";
+      code += "\tif rcv." + fieldCamelName + " != nil {\n";
+      code += "\t\t" + field.name + "Offset = rcv." + fieldCamelName + ".ToFlatBuffer(builder)\n";
+      code += "\t}\n";
+    }
+
+    for (auto it = struct_def.fields.vec.begin(); it != struct_def.fields.vec.end(); ++it) {
+      auto &field = **it;
+      if (field.deprecated || field.value.type.base_type != BASE_TYPE_STRING) continue;
+      auto fieldCamelName = MakeCamel(field.name);
+      code += "\t" + field.name + "Offset := flatbuffers.UOffsetT(0)\n";
+      code += "\tif rcv." + fieldCamelName + " != \"\" {\n";
+      code += "\t\t" + field.name + "Offset = builder.CreateString(rcv." + fieldCamelName + ")\n";
+      code += "\t}\n";
+    }
+
+    code += "\t" + struct_def.name + "Start(builder)\n";
+    for (auto it = struct_def.fields.vec.begin(); it != struct_def.fields.vec.end(); ++it) {
+      auto &field = **it;
+      if (field.deprecated) continue;
+      auto fieldCamelName = MakeCamel(field.name);
+      const auto& type = field.value.type;
+      std::string valueStr;
+      if (type.base_type == BASE_TYPE_UNION ||
+          type.base_type == BASE_TYPE_VECTOR ||
+          type.base_type == BASE_TYPE_STRUCT ||
+          type.base_type == BASE_TYPE_STRING) {
+        valueStr = field.name + "Offset";
+      } else {
+        valueStr = "rcv." + fieldCamelName;
+      }
+      code += "\t" + struct_def.name + "Add" + fieldCamelName + "(builder, " + valueStr + ")\n";
+    }
+    code += "\treturn " + struct_def.name + "End(builder)\n";
+    code += "}\n\n";
+  }
+
+  void GenInnerStructToFlatBuffer(const StructDef &struct_def, std::string *code_ptr) {
+    std::string &code = *code_ptr;
+    GenInnerReceiver(struct_def, code_ptr);
+    code += " ToFlatBuffer(builder *flatbuffers.Builder) flatbuffers.UOffsetT {\n";
+    code += "\treturn Create" + struct_def.name + "(\n";
+    code += "\t\tbuilder,\n";
+    for (auto it = struct_def.fields.vec.begin(); it != struct_def.fields.vec.end(); ++it) {
+      auto &field = **it;
+      if (field.deprecated) continue;
+      code += "\t\trcv." + MakeCamel(field.name) + ",\n";
+    }
+    code += "\t)\n";
+    code += "}\n\n";
+  }
+
+  void GenInnerBuildAndCreate(const StructDef &struct_def, std::string *code_ptr) {
+    std::string &code = *code_ptr;
+    GenInnerReceiver(struct_def, code_ptr);
+    code += " Build() *flatbuffers.Builder {\n";
+    code += "\tbuilder := flatbuffers.NewBuilder(1024)\n";
+    code += "\toffset := rcv.ToFlatBuffer(builder)\n";
+    code += "\tbuilder.Finish(offset)\n";
+    code += "\treturn builder\n";
+    code += "}\n\n";
+
+    if (!struct_def.fixed) {
+      GenInnerReceiver(struct_def, code_ptr);
+      code += " Create() *" + struct_def.name + " {\n";
+      code += "\tbuilder := rcv.Build()\n";
+      code += "\treturn GetRootAs" + struct_def.name + "(builder.FinishedBytes(), 0)\n";
+      code += "}\n\n";
+    }
+  }
+
   // Generate struct or table methods.
   void GenStruct(const StructDef &struct_def, std::string *code_ptr) {
     if (struct_def.generated) return;
@@ -660,6 +983,9 @@ class GoGenerator : public BaseGenerator {
 
     GenComment(struct_def.doc_comment, code_ptr, nullptr);
     BeginClass(struct_def, code_ptr);
+    GenInnerObject(struct_def, code_ptr);
+    GenInnerObjectStringFunc(struct_def, code_ptr);
+    GenObjectStringFunc(struct_def, code_ptr);
     if (!struct_def.fixed) {
       // Generate a special accessor for the table that has been declared as
       // the root type.
@@ -689,6 +1015,14 @@ class GoGenerator : public BaseGenerator {
       // Create a set of functions that allow table construction.
       GenTableBuilders(struct_def, code_ptr);
     }
+
+    GenToInnerObject(struct_def, code_ptr);
+    if (struct_def.fixed) {
+      GenInnerStructToFlatBuffer(struct_def, code_ptr);
+    } else {
+      GenInnerObjectToFlatBuffer(struct_def, code_ptr);
+    }
+    GenInnerBuildAndCreate(struct_def, code_ptr);
   }
 
   // Generate enum declarations.
@@ -715,6 +1049,14 @@ class GoGenerator : public BaseGenerator {
       EnumNameMember(enum_def, ev, code_ptr);
     }
     EndEnumNames(code_ptr);
+
+    BeginEnumValues(enum_def, code_ptr);
+    for (auto it = enum_def.vals.vec.begin(); it != enum_def.vals.vec.end();
+         ++it) {
+      auto &ev = **it;
+      EnumValueMember(enum_def, ev, code_ptr);
+    }
+    EndEnumValues(code_ptr);
   }
 
   // Returns the function name that is able to read a value of the given type.
@@ -793,6 +1135,7 @@ class GoGenerator : public BaseGenerator {
     code += "package " + name_space_name + "\n\n";
     if (needs_imports) {
       code += "import (\n";
+      code += "\t\"encoding/json\"\n";
       if (!parser_.opts.go_import.empty()) {
         code += "\tflatbuffers \"" + parser_.opts.go_import + "\"\n";
       } else {
