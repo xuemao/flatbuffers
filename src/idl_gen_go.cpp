@@ -805,8 +805,8 @@ class GoGenerator : public BaseGenerator {
       const auto& type = field.value.type;
       if (type.base_type == BASE_TYPE_UNION) {
         const EnumDef &enum_def = *type.enum_def;
-        for (auto it = enum_def.vals.vec.begin(); it != enum_def.vals.vec.end(); ++it) {
-          auto &ev = **it;
+        for (auto it2 = enum_def.vals.vec.begin(); it2 != enum_def.vals.vec.end(); ++it2) {
+          auto &ev = **it2;
           if (ev.value == 0) {
             continue;
           }
@@ -856,8 +856,8 @@ class GoGenerator : public BaseGenerator {
       code += "\t" + field.name + "Offset := flatbuffers.UOffsetT(0)\n";
       code += "\tif rcv." + fieldCamelName + " != nil {\n";
       const EnumDef &enum_def = *type.enum_def;
-      for (auto it = enum_def.vals.vec.begin(); it != enum_def.vals.vec.end(); ++it) {
-        auto &ev = **it;
+      for (auto it2 = enum_def.vals.vec.begin(); it2 != enum_def.vals.vec.end(); ++it2) {
+        auto &ev = **it2;
         if (ev.value == 0) {
           continue;
         }
