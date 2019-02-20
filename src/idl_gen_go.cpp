@@ -875,6 +875,7 @@ class GoGenerator : public BaseGenerator {
       auto fieldCamelName = MakeCamel(field.name);
       code += "\t" + field.name + "Offset := flatbuffers.UOffsetT(0)\n";
       code += "\tif len(rcv." + fieldCamelName + ") > 0 {\n";
+      // TODO: Handle vector of fixed struct
       if (type.element == BASE_TYPE_STRUCT || type.element == BASE_TYPE_STRING) {
         std::string toOffsetMethod = (type.element == BASE_TYPE_STRUCT)
           ? "v.ToFlatBuffer(builder)"
@@ -902,7 +903,7 @@ class GoGenerator : public BaseGenerator {
 
     for (auto it = struct_def.fields.vec.begin(); it != struct_def.fields.vec.end(); ++it) {
       auto &field = **it;
-      if (field.deprecated || field.value.type.base_type != BASE_TYPE_STRUCT) continue;
+      if (field.deprecated || field.value.type.base_type != BASE_TYPE_STRUCT || field.value.type.struct_def->fixed) continue;
       auto fieldCamelName = MakeCamel(field.name);
       code += "\t" + field.name + "Offset := flatbuffers.UOffsetT(0)\n";
       code += "\tif rcv." + fieldCamelName + " != nil {\n";
@@ -927,7 +928,15 @@ class GoGenerator : public BaseGenerator {
       auto fieldCamelName = MakeCamel(field.name);
       const auto& type = field.value.type;
       std::string valueStr;
-      if (type.base_type == BASE_TYPE_UNION ||
+      if (type.base_type == BASE_TYPE_STRUCT && type.struct_def->fixed) {
+        valueStr = "Create" + MakeCamel(type.struct_def->name) + "(builder";
+        for (auto it2 = type.struct_def->fields.vec.begin(); it2 != type.struct_def->fields.vec.end(); ++it2) {
+          auto &structField = **it2;
+          if (structField.deprecated) continue;
+          valueStr += ", rcv." + fieldCamelName + "." + MakeCamel(structField.name);
+        }
+        valueStr += ")";
+      } else if (type.base_type == BASE_TYPE_UNION ||
           type.base_type == BASE_TYPE_VECTOR ||
           type.base_type == BASE_TYPE_STRUCT ||
           type.base_type == BASE_TYPE_STRING) {
